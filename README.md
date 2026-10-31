@@ -1,33 +1,20 @@
-# Brightloop Subscription Management System
+# Odoo_Hackathon — Brightloop Subscription Management System
 
-This repository currently contains backend modules for product and variant management, subscription plans, quotations, and subscription lifecycle/billing-schedule management. Authentication, customer/user management, invoices, payments, and analytics remain owned by the other team members.
+This repository contains backend modules for product and variant management, subscription plans, quotations, and subscription lifecycle/billing-schedule management. Authentication, customer/user management, invoices, payments, and analytics remain owned by their respective modules.
 
 ## Backend setup
 
-Requirements: Node.js 18+ and a MongoDB Atlas URI (or another MongoDB replica set; multi-document transactions are used for coordinated catalog and subscription writes).
+Requirements: Node.js 20+ and a MongoDB Atlas URI (or another MongoDB replica set; multi-document transactions are used for coordinated catalog and subscription writes).
 
 ```powershell
 cd server
 npm install
-```
-
-Configure these environment variables before starting the API:
-
-```text
-MONGODB_URI=<MongoDB connection string>
-MEMBER1_AUTH_MODULE=<absolute path to Member 1's CommonJS module>
-PORT=3000
-```
-
-Copy the root environment template and fill in the values:
-
-```powershell
 Copy-Item ..\.env.example ..\.env
 ```
 
-The server loads the root `.env` file on startup. A process manager or shell may also supply these variables; externally supplied values take precedence.
+Fill in the values in the root `.env` file. The server loads it at startup; environment variables supplied by the shell or process manager take precedence.
 
-The Member 1 module must export an Express `authenticate` middleware. It must attach `req.user` with a stable `id` (or `_id`/`uid`), `role`, a `permissions` array, and `customerId` for customer accounts. This implementation intentionally does not create or verify Firebase credentials itself. Permission names and request/response contracts are listed in [docs/api-contracts.md](./docs/api-contracts.md).
+By default, the server uses the repository's Firebase Authentication middleware, which requires `FIREBASE_PROJECT_ID` and Google Application Default Credentials (for example, `GOOGLE_APPLICATION_CREDENTIALS`). To integrate Member 1's middleware instead, set `MEMBER1_AUTH_MODULE` to the absolute path of a CommonJS module exporting an Express `authenticate` middleware. It must attach `req.user` with a stable `id` (or `_id`/`uid`), `role`, a `permissions` array, and `customerId` for customer accounts.
 
 Start and test:
 
@@ -36,7 +23,9 @@ npm start
 npm test
 ```
 
-Mongoose creates indexes from the model definitions on connection. Product and plan deletion endpoints archive records to preserve references and billing snapshots. Subscription line items preserve the purchased names, quantities, historical unit prices, and tax information.
+Mongoose creates indexes from the model definitions on connection. Product and plan deletion endpoints archive records to preserve references and billing snapshots. Subscription line items preserve purchased names, quantities, historical unit prices, and tax information.
+
+Permission names and request/response contracts are listed in [docs/api-contracts.md](./docs/api-contracts.md).
 
 ## Backend module layout
 
@@ -44,5 +33,4 @@ Mongoose creates indexes from the model definitions on connection. Product and p
 - `server/src/modules/plans/` — Plan models, routes, and availability rules.
 - `server/src/modules/quotations/` — Quotation/template models and workflow routes.
 - `server/src/modules/subscriptions/` — Subscription models, lifecycle, history, and billing schedule.
-- `server/src/routes/index.js` — domain router composition.
-- `docs/api-contracts.md` — route permissions and billing integration contract.
+- `server/src/routes/index.js` — Domain router composition.

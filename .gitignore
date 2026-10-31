@@ -1,5 +1,14 @@
 node_modules/
+**/node_modules/
+dist/
+build/
+coverage/
+server/coverage/
 .env
 .env.*
 !.env.example
-server/coverage/
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+service-account*.json
+*firebase-adminsdk*.json
