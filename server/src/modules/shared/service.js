@@ -119,6 +119,28 @@ function lineItemsTotal(lines) {
   return money(lines.reduce((sum, line) => sum + line.lineTotal, 0));
 }
 
+function dueBillingFilter({ asOf, planId, frequency, matchingPlanIds = [] }) {
+  const filter = {
+    status: 'active',
+    nextBillingDate: { $lte: asOf }
+  };
+  if (planId) filter.planId = planId;
+
+  const conditions = [
+    { $or: [{ expiryDate: null }, { expiryDate: { $gt: asOf } }] }
+  ];
+  if (frequency) {
+    conditions.push({
+      $or: [
+        { billingFrequency: frequency },
+        { billingFrequency: null, planId: { $in: matchingPlanIds } }
+      ]
+    });
+  }
+  filter.$and = conditions;
+  return filter;
+}
+
 async function createSubscriptionRecord({
   customerId,
   plan,
@@ -697,10 +719,13 @@ async function confirmQuotation(id, actorId) {
   return result;
 }
 
-async function createQuotationFromSubscription(id, { validityDays, notes }, actorId) {
+async function createQuotationFromSubscription(id, { validityDays, notes }, actorId, { customerId } = {}) {
   if (!mongoose.isValidObjectId(id)) fail(404, 'Subscription not found');
   return transaction(async (session) => {
-    const subscription = await Subscription.findById(id).session(session);
+    const subscription = await Subscription.findOne({
+      _id: id,
+      ...(customerId ? { customerId } : {})
+    }).session(session);
     if (!subscription) fail(404, 'Subscription not found');
     if (subscription.status !== 'draft') fail(409, 'Only draft subscriptions can be sent as quotations');
     const plan = await Plan.findById(subscription.planId).session(session);
@@ -842,19 +867,17 @@ async function listSubscriptions(query, { customerId } = {}) {
 async function listDueForBilling(query) {
   const asOf = query.asOf || new Date();
   if (asOf >= new Date()) await expireSubscriptions();
-  const filter = {
-    status: 'active',
-    nextBillingDate: { $lte: asOf },
-    $or: [{ expiryDate: null }, { expiryDate: { $gt: asOf } }]
-  };
-  if (query.planId) filter.planId = query.planId;
+  let matchingPlanIds = [];
   if (query.frequency) {
     const plans = await Plan.find({ frequency: query.frequency }).select('_id').lean();
-    const ids = plans.map((plan) => plan._id);
-    filter.planId = query.planId
-      ? { $in: ids.filter((id) => id.toString() === query.planId) }
-      : { $in: ids };
+    matchingPlanIds = plans.map((plan) => plan._id);
   }
+  const filter = dueBillingFilter({
+    asOf,
+    planId: query.planId,
+    frequency: query.frequency,
+    matchingPlanIds
+  });
   const result = await paged(Subscription, query, filter, { nextBillingDate: 1, _id: 1 });
   const subscriptionIds = result.results.map((subscription) => subscription._id);
   const [items, plans] = await Promise.all([
@@ -1057,6 +1080,7 @@ module.exports = {
   ServiceError,
   fail,
   money,
+  dueBillingFilter,
   listProducts,
   getProduct,
   createProduct,
