@@ -238,6 +238,28 @@ test('API composition requires authentication middleware and denies unauthentica
   }
 });
 
+test('Member 3 routes are mounted and enforce their own permission', async () => {
+  const app = createApp({
+    authenticate(req, res, next) {
+      req.user = { id: 'staff-1', role: 'staff', permissions: ['discounts:manage'] };
+      next();
+    }
+  });
+  const server = app.listen(0);
+  try {
+    await new Promise((resolve) => server.once('listening', resolve));
+    const response = await fetch(`http://127.0.0.1:${server.address().port}/api/discounts`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({})
+    });
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /Invalid|expected|required|too small/i);
+  } finally {
+    server.closeAllConnections();
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
 test('staff module permissions are enforced independently of the exact staff role label', () => {
   let allowed = false;
   requireStaffPermission('products:manage')(

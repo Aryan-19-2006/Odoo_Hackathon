@@ -6,8 +6,9 @@
   "main": "src/app.js",
   "scripts": {
     "start": "node src/server.js",
+    "worker:billing": "node ../worker/billingWorker.js",
     "test": "node --test",
-    "check": "node --check src/app.js && node --check src/server.js && node --check src/config/database.js && node --check src/routes/index.js && node --check src/middleware/requireFirebaseAuth.js && node --check src/middleware/requireRole.js && node --check src/modules/auth/firebaseAdmin.js && node --check src/modules/users/User.js"
+    "check": "node --check src/app.js && node --check src/server.js && node --check src/config/database.js && node --check src/routes/index.js && node --check src/modules/invoices/model.js && node --check src/modules/invoices/service.js && node --check src/modules/invoices/validation.js && node --check src/modules/invoices/routes.js && node --check src/modules/payments/model.js && node --check src/modules/payments/service.js && node --check src/modules/payments/validation.js && node --check src/modules/payments/routes.js && node --check src/modules/discounts/model.js && node --check src/modules/discounts/service.js && node --check src/modules/discounts/validation.js && node --check src/modules/discounts/routes.js && node --check src/modules/taxes/model.js && node --check src/modules/taxes/service.js && node --check src/modules/taxes/validation.js && node --check src/modules/taxes/routes.js && node --check src/modules/billing/routes.js && node --check ../worker/billingWorker.js && node --check src/middleware/requireFirebaseAuth.js && node --check src/middleware/requireRole.js && node --check src/modules/auth/firebaseAdmin.js && node --check src/modules/users/User.js"
   },
   "engines": {
     "node": ">=20"
