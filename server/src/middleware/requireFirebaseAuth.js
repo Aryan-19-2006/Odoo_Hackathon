@@ -1,5 +1,5 @@
-const { getFirebaseAuth } = require("../config/firebaseAdmin");
-const { User } = require("../models/User");
+const { getFirebaseAuth } = require("../modules/auth/firebaseAdmin");
+const { User } = require("../modules/users/User");
 
 const INVALID_TOKEN_ERROR_CODES = new Set([
   "auth/argument-error",

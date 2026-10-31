@@ -1,8 +1,8 @@
 require("dotenv").config();
 
 const app = require("./app");
-const { initializeFirebaseAdmin } = require("./config/firebaseAdmin");
-const { connectToDatabase } = require("./config/mongodb");
+const { initializeFirebaseAdmin } = require("./modules/auth/firebaseAdmin");
+const { connectToDatabase } = require("./config/database");
 
 async function startServer() {
   initializeFirebaseAdmin();

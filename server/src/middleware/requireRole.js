@@ -1,4 +1,4 @@
-const { USER_ROLES } = require("../models/User");
+const { USER_ROLES } = require("../modules/users/User");
 
 function requireRole(...allowedRoles) {
   if (
