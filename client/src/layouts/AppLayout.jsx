@@ -41,6 +41,7 @@ function BrandMark() {
 
 function isNavigationAllowed(item, role, permissions) {
   if (item.roles && !item.roles.includes(role)) return false;
+  if (role === 'admin' || permissions?.includes('*')) return true;
   if (
     item.permission &&
     (!Array.isArray(permissions) || !permissions.includes(item.permission))
