@@ -49,6 +49,22 @@ test('plan validation rejects invalid availability and incomplete auto-close set
   assert.equal(incompleteAutoClose.success, false);
 });
 
+test('optional plan dates and subscription expiry can be explicitly cleared', () => {
+  const validId = '507f1f77bcf86cd799439011';
+  const planPatch = validation.planPatch.safeParse({ availableTo: null });
+  assert.equal(planPatch.success, true);
+  assert.equal(planPatch.data.availableTo, null);
+
+  const subscription = validation.subscriptionInput.safeParse({
+    customerId: 'customer-1',
+    planId: validId,
+    expiryDate: null,
+    items: [{ productId: validId, quantity: 1 }]
+  });
+  assert.equal(subscription.success, true);
+  assert.equal(subscription.data.expiryDate, null);
+});
+
 test('subscription validation requires line items and a valid plan reference', () => {
   const result = validation.subscriptionInput.safeParse({
     planId: 'not-an-object-id',

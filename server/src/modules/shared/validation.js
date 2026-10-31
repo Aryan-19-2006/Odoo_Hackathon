@@ -2,6 +2,7 @@ const { z } = require('zod');
 
 const objectId = z.string().regex(/^[a-f\d]{24}$/i, 'Must be a valid MongoDB ID');
 const optionalDate = z.coerce.date().optional();
+const nullableDate = z.union([z.null(), z.coerce.date()]).optional();
 const status = (values) => z.enum(values);
 
 const variantInput = z.object({
@@ -29,8 +30,8 @@ const planInput = z.object({
   frequency: status(['daily', 'weekly', 'monthly', 'yearly']),
   minQuantity: z.number().int().min(1).default(1),
   productIds: z.array(objectId).min(1),
-  availableFrom: optionalDate,
-  availableTo: optionalDate,
+  availableFrom: nullableDate,
+  availableTo: nullableDate,
   autoClose: z.boolean().default(false),
   autoCloseAfterCycles: z.number().int().min(1).optional(),
   earlyCloseAllowed: z.boolean().default(false),
@@ -51,8 +52,8 @@ const planPatch = z.object({
   frequency: status(['daily', 'weekly', 'monthly', 'yearly']).optional(),
   minQuantity: z.number().int().min(1).optional(),
   productIds: z.array(objectId).min(1).optional(),
-  availableFrom: optionalDate,
-  availableTo: optionalDate,
+  availableFrom: nullableDate,
+  availableTo: nullableDate,
   autoClose: z.boolean().optional(),
   autoCloseAfterCycles: z.number().int().min(1).optional(),
   earlyCloseAllowed: z.boolean().optional(),
@@ -88,7 +89,7 @@ const quotationInput = z.object({
   items: z.array(lineItemInput).min(1).optional(),
   notes: z.string().max(4000).optional(),
   startDate: optionalDate,
-  expiryDate: optionalDate,
+  expiryDate: nullableDate,
   paymentTerms: z.string().max(1000).optional()
 }).refine((value) => Boolean(value.templateId) || (value.planId && value.items), {
   message: 'Provide a templateId or both planId and items',
@@ -102,7 +103,7 @@ const subscriptionFields = z.object({
   customerId: z.string().trim().min(1).max(160).optional(),
   planId: objectId,
   startDate: optionalDate,
-  expiryDate: optionalDate,
+  expiryDate: nullableDate,
   paymentTerms: z.string().max(1000).optional(),
   items: z.array(lineItemInput).min(1),
   taxId: objectId.optional()

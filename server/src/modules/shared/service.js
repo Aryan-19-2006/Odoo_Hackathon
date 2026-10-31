@@ -169,8 +169,42 @@ async function addHistory(subscriptionId, action, fromStatus, toStatus, actorId,
   );
 }
 
+async function expireSubscriptions(filter = {}) {
+  const now = new Date();
+  const expiredSubscriptions = await Subscription.find({
+    ...filter,
+    status: { $in: ['active', 'confirmed'] },
+    expiryDate: { $type: 'date', $lte: now }
+  }).select('_id').limit(250).lean();
+
+  for (const { _id } of expiredSubscriptions) {
+    await transaction(async (session) => {
+      const subscription = await Subscription.findOne({
+        _id,
+        status: { $in: ['active', 'confirmed'] },
+        expiryDate: { $type: 'date', $lte: now }
+      }).session(session);
+      if (!subscription) return;
+      const previous = subscription.status;
+      subscription.status = 'expired';
+      subscription.closedAt = subscription.expiryDate;
+      await subscription.save({ session });
+      await addHistory(
+        subscription._id,
+        'expired',
+        previous,
+        'expired',
+        'system',
+        { expiryDate: subscription.expiryDate },
+        session
+      );
+    });
+  }
+}
+
 async function getSubscriptionDocument(id, filter = {}, session = null) {
   if (!mongoose.isValidObjectId(id)) fail(404, 'Subscription not found');
+  if (!session) await expireSubscriptions({ _id: id });
   const subscription = await Subscription.findOne({ _id: id, ...filter }).session(session).lean();
   if (!subscription) fail(404, 'Subscription not found');
   const [items, plan] = await Promise.all([
@@ -274,16 +308,35 @@ async function updateProduct(id, input) {
     Object.assign(product, fields);
     await product.save({ session });
     if (variants) await saveProductVariants(product._id, variants, session);
+    if (fields.status && fields.status !== 'active') {
+      await ProductVariant.updateMany(
+        { product: product._id, status: 'active' },
+        { $set: { status: 'inactive' } },
+        { session }
+      );
+      await Plan.updateMany(
+        { productIds: product._id, status: 'active' },
+        { $set: { status: 'inactive' } },
+        { session }
+      );
+    }
     return getProduct(product._id, {}, session);
   });
 }
 
 async function deleteProduct(id) {
   if (!mongoose.isValidObjectId(id)) fail(404, 'Product not found');
-  const product = await Product.findByIdAndUpdate(id, { $set: { status: 'archived' } }, { new: true });
-  if (!product) fail(404, 'Product not found');
-  await ProductVariant.updateMany({ product: id }, { $set: { status: 'inactive' } });
-  return getProduct(id, {});
+  return transaction(async (session) => {
+    const product = await Product.findByIdAndUpdate(
+      id,
+      { $set: { status: 'archived' } },
+      { new: true, session }
+    );
+    if (!product) fail(404, 'Product not found');
+    await ProductVariant.updateMany({ product: id }, { $set: { status: 'inactive' } }, { session });
+    await Plan.updateMany({ productIds: id, status: 'active' }, { $set: { status: 'inactive' } }, { session });
+    return getProduct(id, {}, session);
+  });
 }
 
 async function listPlans(query, { customer = false } = {}) {
@@ -544,6 +597,10 @@ async function getQuotation(id, { customerId } = {}) {
 
 async function updateQuotation(id, input, { customerId } = {}) {
   if (!mongoose.isValidObjectId(id)) fail(404, 'Quotation not found');
+  await expireOpenQuotations({
+    _id: id,
+    ...(customerId ? { customerId } : {})
+  });
   return transaction(async (session) => {
     const quotation = await Quotation.findOne({ _id: id, ...(customerId ? { customerId } : {}) }).session(session);
     if (!quotation) fail(404, 'Quotation not found');
@@ -553,6 +610,13 @@ async function updateQuotation(id, input, { customerId } = {}) {
     const planId = input.planId || quotation.planId;
     const plan = await Plan.findById(planId).session(session);
     if (!plan) fail(404, 'Plan not found');
+    const linkedSubscription = quotation.subscriptionId
+      ? await Subscription.findOne({ _id: quotation.subscriptionId, status: 'quotation' }).session(session)
+      : null;
+    if (quotation.subscriptionId && !linkedSubscription) {
+      fail(409, 'Linked subscription is no longer editable');
+    }
+    activeAvailability(plan, linkedSubscription ? linkedSubscription.startDate : new Date());
     const items = input.items ? await resolveLines(input.items, plan, session) : undefined;
     if (!items && input.planId && input.planId !== quotation.planId.toString()) {
       await validatePlanProducts(plan, quotation.items);
@@ -564,22 +628,25 @@ async function updateQuotation(id, input, { customerId } = {}) {
     }
     await quotation.save({ session });
 
-    if (quotation.subscriptionId) {
-      const subscription = await Subscription.findOne({
-        _id: quotation.subscriptionId,
-        status: 'quotation'
-      }).session(session);
-      if (!subscription) fail(409, 'Linked subscription is no longer editable');
-      subscription.planId = planId;
+    if (linkedSubscription) {
+      linkedSubscription.planId = planId;
+      if (planId.toString() !== quotation.planId.toString()) {
+        linkedSubscription.billingAnchorDate = linkedSubscription.startDate;
+        linkedSubscription.nextBillingDate = addBillingPeriod(
+          linkedSubscription.startDate,
+          plan.frequency,
+          linkedSubscription.startDate
+        );
+      }
       if (items) {
-        subscription.totalAmount = lineItemsTotal(items);
-        await SubscriptionItem.deleteMany({ subscriptionId: subscription._id }, { session });
+        linkedSubscription.totalAmount = lineItemsTotal(items);
+        await SubscriptionItem.deleteMany({ subscriptionId: linkedSubscription._id }, { session });
         await SubscriptionItem.insertMany(
-          items.map((item) => ({ ...item, subscriptionId: subscription._id })),
+          items.map((item) => ({ ...item, subscriptionId: linkedSubscription._id })),
           { session }
         );
       }
-      await subscription.save({ session });
+      await linkedSubscription.save({ session });
     }
     return quotation;
   });
@@ -728,6 +795,7 @@ async function updateSubscription(id, input, { customerId, actorId }) {
 }
 
 async function listSubscriptions(query, { customerId } = {}) {
+  await expireSubscriptions(customerId ? { customerId } : {});
   const filter = {};
   if (customerId) filter.customerId = customerId;
   if (query.customerId) filter.customerId = query.customerId;
@@ -768,6 +836,7 @@ async function listSubscriptions(query, { customerId } = {}) {
 
 async function listDueForBilling(query) {
   const asOf = query.asOf || new Date();
+  if (asOf >= new Date()) await expireSubscriptions();
   const filter = {
     status: 'active',
     nextBillingDate: { $lte: asOf },
@@ -822,6 +891,7 @@ async function listDueForBilling(query) {
 
 async function transitionSubscription(id, action, actorId, { customerId } = {}) {
   if (!mongoose.isValidObjectId(id)) fail(404, 'Subscription not found');
+  await expireSubscriptions({ _id: id, ...(customerId ? { customerId } : {}) });
   return transaction(async (session) => {
     const subscription = await Subscription.findOne({
       _id: id,
@@ -835,6 +905,7 @@ async function transitionSubscription(id, action, actorId, { customerId } = {}) 
 
     if (action === 'activate') {
       if (previous !== 'confirmed') fail(409, 'Only confirmed subscriptions can be activated');
+      if (subscription.startDate > now) fail(409, 'A subscription cannot be activated before its start date');
       activeAvailability(plan, subscription.startDate);
       subscription.status = 'active';
     } else if (action === 'pause') {
@@ -942,6 +1013,10 @@ async function recordBilling(id, { idempotencyKey, billedAt, externalInvoiceId }
       subscription.status = 'closed';
       subscription.closedAt = billedTime;
       action = 'auto-closed-after-billing';
+    } else if (subscription.expiryDate && periodEnd >= subscription.expiryDate) {
+      subscription.status = 'expired';
+      subscription.closedAt = subscription.expiryDate;
+      action = 'expired-after-billing';
     }
     await subscription.save({ session });
     await addHistory(id, action, 'active', subscription.status, actorId, { periodStart, periodEnd }, session);
@@ -955,6 +1030,7 @@ async function recordBilling(id, { idempotencyKey, billedAt, externalInvoiceId }
 
 async function getSubscriptionHistory(id, filter = {}) {
   if (!mongoose.isValidObjectId(id)) fail(404, 'Subscription not found');
+  await expireSubscriptions({ _id: id, ...filter });
   const subscription = await Subscription.findOne({ _id: id, ...filter }).select('_id').lean();
   if (!subscription) fail(404, 'Subscription not found');
   return SubscriptionHistory.find({ subscriptionId: id }).sort({ createdAt: -1 }).lean();
