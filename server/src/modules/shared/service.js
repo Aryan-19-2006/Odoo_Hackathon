@@ -142,6 +142,15 @@ function billingRetryMatches(existingEvent, { billedAt, externalInvoiceId }) {
   return true;
 }
 
+function savedFrequencyFilter(frequency, matchingPlanIds = []) {
+  return {
+    $or: [
+      { billingFrequency: frequency },
+      { billingFrequency: null, planId: { $in: matchingPlanIds } }
+    ]
+  };
+}
+
 function dueBillingFilter({ asOf, planId, frequency, matchingPlanIds = [] }) {
   const filter = {
     status: 'active',
@@ -153,12 +162,7 @@ function dueBillingFilter({ asOf, planId, frequency, matchingPlanIds = [] }) {
     { $or: [{ expiryDate: null }, { expiryDate: { $gt: asOf } }] }
   ];
   if (frequency) {
-    conditions.push({
-      $or: [
-        { billingFrequency: frequency },
-        { billingFrequency: null, planId: { $in: matchingPlanIds } }
-      ]
-    });
+    conditions.push(savedFrequencyFilter(frequency, matchingPlanIds));
   }
   filter.$and = conditions;
   return filter;
@@ -875,10 +879,7 @@ async function listSubscriptions(query, { customerId } = {}) {
   if (query.planId) filter.planId = query.planId;
   if (query.frequency) {
     const plans = await Plan.find({ frequency: query.frequency }).select('_id').lean();
-    const ids = plans.map((plan) => plan._id);
-    filter.planId = query.planId
-      ? { $in: ids.filter((id) => id.toString() === query.planId) }
-      : { $in: ids };
+    filter.$and = [savedFrequencyFilter(query.frequency, plans.map((plan) => plan._id))];
   }
   if (query.from || query.to) {
     filter.startDate = {};
@@ -1131,6 +1132,7 @@ module.exports = {
   hasExpired,
   scopedCustomerId,
   billingRetryMatches,
+  savedFrequencyFilter,
   dueBillingFilter,
   listProducts,
   getProduct,

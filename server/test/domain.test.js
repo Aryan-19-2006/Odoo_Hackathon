@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const { addBillingPeriod } = require('../src/modules/subscriptions/billingDates');
 const validation = require('../src/modules/shared/validation');
 const { createApp } = require('../src/app');
+const { createAuthenticatedIdentity } = require('../src/middleware/requireFirebaseAuth');
 const {
   requireStaffPermission,
   authorizeOwnAction,
@@ -14,7 +15,8 @@ const {
   isEarlyClose,
   hasExpired,
   scopedCustomerId,
-  billingRetryMatches
+  billingRetryMatches,
+  savedFrequencyFilter
 } = require('../src/modules/shared/service');
 
 test('daily and weekly billing periods use exact UTC day increments', () => {
@@ -57,6 +59,16 @@ test('due billing frequency filters use snapshots and fall back only for legacy 
           { billingFrequency: null, planId: { $in: [legacyMonthlyPlanId] } }
         ]
       }
+    ]
+  });
+});
+
+test('subscription frequency filters prefer snapshots over current plan settings', () => {
+  const legacyPlanId = '507f1f77bcf86cd799439011';
+  assert.deepEqual(savedFrequencyFilter('monthly', [legacyPlanId]), {
+    $or: [
+      { billingFrequency: 'monthly' },
+      { billingFrequency: null, planId: { $in: [legacyPlanId] } }
     ]
   });
 });
@@ -281,4 +293,35 @@ test('customers may create quotations only with own permission and matching owne
     status: 403,
     message: 'You cannot change subscription or quotation ownership'
   });
+});
+
+test('Firebase identity forwards verified permissions and customer ownership claims', () => {
+  const user = {
+    _id: { toString: () => 'user-123' },
+    firebaseUid: 'firebase-uid',
+    email: 'customer@example.com',
+    role: 'customer',
+    isActive: true
+  };
+
+  const identity = createAuthenticatedIdentity(user, {
+    email_verified: true,
+    permissions: ['subscriptions:create:own', 42],
+    customerId: 'customer-456'
+  });
+
+  assert.deepEqual(identity, {
+    id: 'user-123',
+    firebaseUid: 'firebase-uid',
+    email: 'customer@example.com',
+    role: 'customer',
+    isActive: true,
+    emailVerified: true,
+    permissions: ['subscriptions:create:own'],
+    customerId: 'customer-456'
+  });
+
+  const identityWithoutClaims = createAuthenticatedIdentity(user, {});
+  assert.deepEqual(identityWithoutClaims.permissions, []);
+  assert.equal('customerId' in identityWithoutClaims, false);
 });
