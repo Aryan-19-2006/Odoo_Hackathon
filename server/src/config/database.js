@@ -1,15 +1,15 @@
-const mongoose = require("mongoose");
-
-async function connectDatabase(uri = process.env.MONGODB_URI) {
-  if (!uri) {
-    throw new Error("MONGODB_URI must be configured");
-  }
-
-  await mongoose.connect(uri);
-  return mongoose.connection;
+async function connectDB() {
+  console.log("DUMMY DB mode - MongoDB bypassed");
+  return;
 }
 
-module.exports = {
-  connectDatabase,
-  connectToDatabase: connectDatabase,
-};
+async function connectDatabase() {
+  console.log("DUMMY DB mode - MongoDB bypassed");
+  return;
+}
+
+function getDB() {
+  return null;
+}
+
+module.exports = { connectDB, connectDatabase, getDB };
