@@ -1,0 +1,22 @@
+{
+  "name": "brightloop-subscription-management-api",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Brightloop products, plans, quotations, and subscriptions API",
+  "main": "src/app.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test",
+    "check": "node --check src/app.js && node --check src/server.js && node --check src/config/database.js && node --check src/routes/index.js && node --check src/middleware/requireFirebaseAuth.js && node --check src/middleware/requireRole.js && node --check src/modules/auth/firebaseAdmin.js && node --check src/modules/users/User.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "dotenv": "^18.0.9",
+    "express": "^4.21.2",
+    "firebase-admin": "^13.5.0",
+    "mongoose": "^8.9.5",
+    "zod": "^4.6.7"
+  }
+}

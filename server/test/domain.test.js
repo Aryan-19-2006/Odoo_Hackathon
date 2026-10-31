@@ -1,0 +1,327 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const { addBillingPeriod } = require('../src/modules/subscriptions/billingDates');
+const validation = require('../src/modules/shared/validation');
+const { createApp } = require('../src/app');
+const { createAuthenticatedIdentity } = require('../src/middleware/requireFirebaseAuth');
+const {
+  requireStaffPermission,
+  authorizeOwnAction,
+  assertCustomerCanRequest
+} = require('../src/middleware/access');
+const {
+  createDocumentNumber,
+  dueBillingFilter,
+  isEarlyClose,
+  hasExpired,
+  scopedCustomerId,
+  billingRetryMatches,
+  savedFrequencyFilter
+} = require('../src/modules/shared/service');
+
+test('daily and weekly billing periods use exact UTC day increments', () => {
+  const start = new Date('2024-01-01T10:15:00.000Z');
+  assert.equal(addBillingPeriod(start, 'daily').toISOString(), '2024-01-02T10:15:00.000Z');
+  assert.equal(addBillingPeriod(start, 'weekly').toISOString(), '2024-01-08T10:15:00.000Z');
+});
+
+test('monthly billing clamps to the last day without drifting through overflow', () => {
+  const jan31 = new Date('2024-01-31T12:00:00.000Z');
+  const feb29 = addBillingPeriod(jan31, 'monthly');
+  assert.equal(feb29.toISOString(), '2024-02-29T12:00:00.000Z');
+  assert.equal(addBillingPeriod(feb29, 'monthly', jan31).toISOString(), '2024-03-31T12:00:00.000Z');
+});
+
+test('yearly billing clamps leap day in a non-leap year', () => {
+  assert.equal(
+    addBillingPeriod(new Date('2024-02-29T00:00:00.000Z'), 'yearly').toISOString(),
+    '2025-02-28T00:00:00.000Z'
+  );
+});
+
+test('due billing frequency filters use snapshots and fall back only for legacy subscriptions', () => {
+  const asOf = new Date('2025-03-01T00:00:00.000Z');
+  const legacyMonthlyPlanId = '507f1f77bcf86cd799439011';
+  const filter = dueBillingFilter({
+    asOf,
+    frequency: 'monthly',
+    matchingPlanIds: [legacyMonthlyPlanId]
+  });
+
+  assert.deepEqual(filter, {
+    status: 'active',
+    nextBillingDate: { $lte: asOf },
+    $and: [
+      { $or: [{ expiryDate: null }, { expiryDate: { $gt: asOf } }] },
+      {
+        $or: [
+          { billingFrequency: 'monthly' },
+          { billingFrequency: null, planId: { $in: [legacyMonthlyPlanId] } }
+        ]
+      }
+    ]
+  });
+});
+
+test('subscription frequency filters prefer snapshots over current plan settings', () => {
+  const legacyPlanId = '507f1f77bcf86cd799439011';
+  assert.deepEqual(savedFrequencyFilter('monthly', [legacyPlanId]), {
+    $or: [
+      { billingFrequency: 'monthly' },
+      { billingFrequency: null, planId: { $in: [legacyPlanId] } }
+    ]
+  });
+});
+
+test('closing a non-expiring subscription is considered an early close', () => {
+  const now = new Date('2025-03-01T00:00:00.000Z');
+  assert.equal(isEarlyClose(null, now), true);
+  assert.equal(isEarlyClose(new Date('2025-03-02T00:00:00.000Z'), now), true);
+  assert.equal(isEarlyClose(new Date('2025-02-28T00:00:00.000Z'), now), false);
+});
+
+test('subscription expiry is inclusive at the expiry timestamp', () => {
+  const expiry = new Date('2025-03-01T00:00:00.000Z');
+  assert.equal(hasExpired(null, expiry), false);
+  assert.equal(hasExpired(new Date('2025-03-01T00:00:00.001Z'), expiry), false);
+  assert.equal(hasExpired(expiry, expiry), true);
+});
+
+test('authenticated customer ownership overrides requested customer filters', () => {
+  assert.equal(scopedCustomerId('customer-1', 'customer-2'), 'customer-1');
+  assert.equal(scopedCustomerId('customer-1', undefined), 'customer-1');
+  assert.equal(scopedCustomerId(undefined, 'customer-2'), 'customer-2');
+});
+
+test('billing idempotency retries reject changed invoice or billed time details', () => {
+  const event = {
+    billedAt: new Date('2025-03-01T10:00:00.000Z'),
+    externalInvoiceId: 'INV-100'
+  };
+  assert.equal(billingRetryMatches(event, {}), true);
+  assert.equal(billingRetryMatches(event, {
+    billedAt: new Date('2025-03-01T10:00:00.000Z'),
+    externalInvoiceId: 'INV-100'
+  }), true);
+  assert.equal(billingRetryMatches(event, { externalInvoiceId: 'INV-101' }), false);
+  assert.equal(billingRetryMatches(event, { billedAt: new Date('2025-03-01T10:01:00.000Z') }), false);
+});
+
+test('document numbers retain the full unique identifier suffix', () => {
+  const date = new Date('2025-03-01T00:00:00.000Z');
+  const first = createDocumentNumber('SUB', date, '507f1f77bcf86cd799123456');
+  const second = createDocumentNumber('SUB', date, '507f1f77bcf86cde99123456');
+
+  assert.equal(first, 'SUB-20250301-507F1F77BCF86CD799123456');
+  assert.notEqual(first, second);
+});
+
+test('unsupported billing frequencies and invalid dates are rejected', () => {
+  assert.throws(() => addBillingPeriod(new Date(), 'hourly'), /Unsupported billing frequency/);
+  assert.throws(() => addBillingPeriod(new Date('invalid'), 'daily'), /valid date/);
+});
+
+test('plan validation rejects invalid availability and incomplete auto-close settings', () => {
+  const validId = '507f1f77bcf86cd799439011';
+  const invalidWindow = validation.planInput.safeParse({
+    name: 'Monthly',
+    frequency: 'monthly',
+    productIds: [validId],
+    availableFrom: '2025-02-01T00:00:00.000Z',
+    availableTo: '2025-01-01T00:00:00.000Z'
+  });
+  assert.equal(invalidWindow.success, false);
+
+  const incompleteAutoClose = validation.planInput.safeParse({
+    name: 'Monthly',
+    frequency: 'monthly',
+    productIds: [validId],
+    autoClose: true
+  });
+  assert.equal(incompleteAutoClose.success, false);
+});
+
+test('optional plan dates and subscription expiry can be explicitly cleared', () => {
+  const validId = '507f1f77bcf86cd799439011';
+  const planPatch = validation.planPatch.safeParse({ availableTo: null });
+  assert.equal(planPatch.success, true);
+  assert.equal(planPatch.data.availableTo, null);
+
+  const subscription = validation.subscriptionInput.safeParse({
+    customerId: 'customer-1',
+    planId: validId,
+    expiryDate: null,
+    items: [{ productId: validId, quantity: 1 }]
+  });
+  assert.equal(subscription.success, true);
+  assert.equal(subscription.data.expiryDate, null);
+});
+
+test('date validation rejects null and non-date values instead of coercing them to epoch', () => {
+  const validId = '507f1f77bcf86cd799439011';
+  const subscription = validation.subscriptionInput.safeParse({
+    customerId: 'customer-1',
+    planId: validId,
+    startDate: null,
+    items: [{ productId: validId, quantity: 1 }]
+  });
+  assert.equal(subscription.success, false);
+
+  const plan = validation.planInput.safeParse({
+    name: 'Monthly',
+    frequency: 'monthly',
+    productIds: [validId],
+    availableFrom: 12345
+  });
+  assert.equal(plan.success, false);
+});
+
+test('subscription validation requires line items and a valid plan reference', () => {
+  const result = validation.subscriptionInput.safeParse({
+    planId: 'not-an-object-id',
+    items: []
+  });
+  assert.equal(result.success, false);
+});
+
+test('product variants accept additive price deltas but reject negative values', () => {
+  const base = {
+    name: 'Service',
+    type: 'software',
+    salesPrice: 1000,
+    costPrice: 500
+  };
+  assert.equal(validation.productInput.safeParse({
+    ...base,
+    variants: [{ name: 'Plus', priceDelta: 560 }]
+  }).success, true);
+  assert.equal(validation.productInput.safeParse({
+    ...base,
+    variants: [{ name: 'Invalid', priceDelta: -1 }]
+  }).success, false);
+});
+
+test('API composition requires authentication middleware and denies unauthenticated requests', async () => {
+  assert.throws(() => createApp({}), /authentication middleware must be supplied/i);
+
+  const app = createApp({
+    authenticate(req, res) {
+      res.status(401).json({ error: 'Unauthenticated' });
+    }
+  });
+
+  const server = app.listen(0);
+  try {
+    await new Promise((resolve) => server.once('listening', resolve));
+    const response = await fetch(`http://127.0.0.1:${server.address().port}/api/products`);
+    assert.equal(response.status, 401);
+  } finally {
+    server.closeAllConnections();
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+
+  const restrictedApp = createApp({
+    authenticate(req, res, next) {
+      req.user = { id: 'staff-1', role: 'staff', permissions: [] };
+      next();
+    }
+  });
+
+  const restrictedServer = restrictedApp.listen(0);
+  try {
+    await new Promise((resolve) => restrictedServer.once('listening', resolve));
+    const response = await fetch(`http://127.0.0.1:${restrictedServer.address().port}/api/products`);
+    assert.equal(response.status, 403);
+  } finally {
+    restrictedServer.closeAllConnections();
+    await new Promise((resolve, reject) => restrictedServer.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
+test('staff module permissions are enforced independently of the exact staff role label', () => {
+  let allowed = false;
+  requireStaffPermission('products:manage')(
+    { user: { id: 'manager-1', role: 'manager', permissions: ['products:manage'] } },
+    {},
+    (error) => {
+      assert.equal(error, undefined);
+      allowed = true;
+    }
+  );
+  assert.equal(allowed, true);
+
+  let deniedStatus;
+  requireStaffPermission('products:manage')(
+    { user: { id: 'staff-1', role: 'staff', permissions: [] } },
+    {},
+    (error) => {
+      deniedStatus = error.status;
+    }
+  );
+  assert.equal(deniedStatus, 403);
+});
+
+test('customers may create quotations only with own permission and matching ownership', () => {
+  let allowed = false;
+  authorizeOwnAction('quotations:manage')(
+    {
+      user: {
+        id: 'customer-user-1',
+        customerId: 'customer-1',
+        role: 'customer',
+        permissions: ['quotations:manage:own']
+      }
+    },
+    {},
+    (error) => {
+      assert.equal(error, undefined);
+      allowed = true;
+    }
+  );
+  assert.equal(allowed, true);
+
+  const req = {
+    user: {
+      id: 'customer-user-1',
+      customerId: 'customer-1',
+      role: 'customer',
+      permissions: ['quotations:manage:own']
+    }
+  };
+  assert.equal(assertCustomerCanRequest(req, 'customer-1'), 'customer-1');
+  assert.throws(() => assertCustomerCanRequest(req, 'customer-2'), {
+    status: 403,
+    message: 'You cannot change subscription or quotation ownership'
+  });
+});
+
+test('Firebase identity forwards verified permissions and customer ownership claims', () => {
+  const user = {
+    _id: { toString: () => 'user-123' },
+    firebaseUid: 'firebase-uid',
+    email: 'customer@example.com',
+    role: 'customer',
+    isActive: true
+  };
+
+  const identity = createAuthenticatedIdentity(user, {
+    email_verified: true,
+    permissions: ['subscriptions:create:own', 42],
+    customerId: 'customer-456'
+  });
+
+  assert.deepEqual(identity, {
+    id: 'user-123',
+    firebaseUid: 'firebase-uid',
+    email: 'customer@example.com',
+    role: 'customer',
+    isActive: true,
+    emailVerified: true,
+    permissions: ['subscriptions:create:own'],
+    customerId: 'customer-456'
+  });
+
+  const identityWithoutClaims = createAuthenticatedIdentity(user, {});
+  assert.deepEqual(identityWithoutClaims.permissions, []);
+  assert.equal('customerId' in identityWithoutClaims, false);
+});
