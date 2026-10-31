@@ -1,19 +1,38 @@
-const path = require('node:path');
-const { connectDatabase } = require('./config/database');
-const { createApp } = require('./app');
+require("dotenv").config();
+
+const path = require("node:path");
+const { createApp } = require("./app");
+const { connectDatabase } = require("./config/database");
+const { requireFirebaseAuth } = require("./middleware/requireFirebaseAuth");
+const { initializeFirebaseAdmin } = require("./modules/auth/firebaseAdmin");
+
+function getAuthenticateMiddleware() {
+  const authModulePath = process.env.MEMBER1_AUTH_MODULE;
+  if (!authModulePath) {
+    return requireFirebaseAuth;
+  }
+
+  const authModule = require(path.resolve(authModulePath));
+  if (typeof authModule.authenticate !== "function") {
+    throw new TypeError(
+      "MEMBER1_AUTH_MODULE must export an authenticate middleware",
+    );
+  }
+
+  return authModule.authenticate;
+}
 
 async function start() {
-  if (!process.env.MEMBER1_AUTH_MODULE) {
-    throw new Error('MEMBER1_AUTH_MODULE must point to Member 1 authentication middleware');
-  }
-  const authModule = require(path.resolve(process.env.MEMBER1_AUTH_MODULE));
-  if (typeof authModule.authenticate !== 'function') {
-    throw new TypeError('Member 1 auth module must export an authenticate middleware');
+  const authenticate = getAuthenticateMiddleware();
+  initializeFirebaseAdmin();
+  await connectDatabase();
+
+  const port = Number(process.env.PORT || 3000);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error("PORT must be an integer between 1 and 65535");
   }
 
-  await connectDatabase();
-  const app = createApp({ authenticate: authModule.authenticate });
-  const port = Number(process.env.PORT || 3000);
+  const app = createApp({ authenticate });
   return app.listen(port, () => {
     console.log(`Brightloop API listening on port ${port}`);
   });
@@ -21,9 +40,9 @@ async function start() {
 
 if (require.main === module) {
   start().catch((error) => {
-    console.error('Unable to start Brightloop API', error);
+    console.error("Unable to start Brightloop API", error);
     process.exitCode = 1;
   });
 }
 
-module.exports = { start };
+module.exports = { start, startServer: start };
