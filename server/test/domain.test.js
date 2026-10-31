@@ -8,7 +8,14 @@ const {
   authorizeOwnAction,
   assertCustomerCanRequest
 } = require('../src/middleware/access');
-const { dueBillingFilter, isEarlyClose } = require('../src/modules/shared/service');
+const {
+  createDocumentNumber,
+  dueBillingFilter,
+  isEarlyClose,
+  hasExpired,
+  scopedCustomerId,
+  billingRetryMatches
+} = require('../src/modules/shared/service');
 
 test('daily and weekly billing periods use exact UTC day increments', () => {
   const start = new Date('2024-01-01T10:15:00.000Z');
@@ -59,6 +66,42 @@ test('closing a non-expiring subscription is considered an early close', () => {
   assert.equal(isEarlyClose(null, now), true);
   assert.equal(isEarlyClose(new Date('2025-03-02T00:00:00.000Z'), now), true);
   assert.equal(isEarlyClose(new Date('2025-02-28T00:00:00.000Z'), now), false);
+});
+
+test('subscription expiry is inclusive at the expiry timestamp', () => {
+  const expiry = new Date('2025-03-01T00:00:00.000Z');
+  assert.equal(hasExpired(null, expiry), false);
+  assert.equal(hasExpired(new Date('2025-03-01T00:00:00.001Z'), expiry), false);
+  assert.equal(hasExpired(expiry, expiry), true);
+});
+
+test('authenticated customer ownership overrides requested customer filters', () => {
+  assert.equal(scopedCustomerId('customer-1', 'customer-2'), 'customer-1');
+  assert.equal(scopedCustomerId('customer-1', undefined), 'customer-1');
+  assert.equal(scopedCustomerId(undefined, 'customer-2'), 'customer-2');
+});
+
+test('billing idempotency retries reject changed invoice or billed time details', () => {
+  const event = {
+    billedAt: new Date('2025-03-01T10:00:00.000Z'),
+    externalInvoiceId: 'INV-100'
+  };
+  assert.equal(billingRetryMatches(event, {}), true);
+  assert.equal(billingRetryMatches(event, {
+    billedAt: new Date('2025-03-01T10:00:00.000Z'),
+    externalInvoiceId: 'INV-100'
+  }), true);
+  assert.equal(billingRetryMatches(event, { externalInvoiceId: 'INV-101' }), false);
+  assert.equal(billingRetryMatches(event, { billedAt: new Date('2025-03-01T10:01:00.000Z') }), false);
+});
+
+test('document numbers retain the full unique identifier suffix', () => {
+  const date = new Date('2025-03-01T00:00:00.000Z');
+  const first = createDocumentNumber('SUB', date, '507f1f77bcf86cd799123456');
+  const second = createDocumentNumber('SUB', date, '507f1f77bcf86cde99123456');
+
+  assert.equal(first, 'SUB-20250301-507F1F77BCF86CD799123456');
+  assert.notEqual(first, second);
 });
 
 test('unsupported billing frequencies and invalid dates are rejected', () => {
