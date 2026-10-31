@@ -10,6 +10,26 @@ const INVALID_TOKEN_ERROR_CODES = new Set([
   "auth/user-not-found",
 ]);
 
+function createAuthenticatedIdentity(user, decodedToken) {
+  const permissions = Array.isArray(decodedToken.permissions)
+    ? decodedToken.permissions.filter((permission) => typeof permission === "string")
+    : [];
+  const customerId = typeof decodedToken.customerId === "string"
+    ? decodedToken.customerId
+    : undefined;
+
+  return {
+    id: user._id.toString(),
+    firebaseUid: user.firebaseUid,
+    email: user.email,
+    role: user.role,
+    isActive: user.isActive,
+    emailVerified: decodedToken.email_verified === true,
+    permissions,
+    ...(customerId ? { customerId } : {})
+  };
+}
+
 async function requireFirebaseAuth(req, res, next) {
   const authorization = req.get("authorization");
   const match = authorization?.match(/^Bearer\s+(\S+)$/i);
@@ -28,14 +48,7 @@ async function requireFirebaseAuth(req, res, next) {
       return res.status(403).json({ error: "User account is unavailable" });
     }
 
-    req.user = {
-      id: user._id.toString(),
-      firebaseUid: user.firebaseUid,
-      email: user.email,
-      role: user.role,
-      isActive: user.isActive,
-      emailVerified: decodedToken.email_verified === true,
-    };
+    req.user = createAuthenticatedIdentity(user, decodedToken);
 
     return next();
   } catch (error) {
@@ -47,4 +60,4 @@ async function requireFirebaseAuth(req, res, next) {
   }
 }
 
-module.exports = { requireFirebaseAuth };
+module.exports = { createAuthenticatedIdentity, requireFirebaseAuth };

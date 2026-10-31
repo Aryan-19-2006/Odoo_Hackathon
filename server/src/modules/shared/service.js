@@ -45,6 +45,11 @@ function money(value) {
   return Math.round((value + Number.EPSILON) * 100) / 100;
 }
 
+function createDocumentNumber(prefix, date = new Date(), id = new mongoose.Types.ObjectId()) {
+  const datePart = date.toISOString().slice(0, 10).replace(/-/g, '');
+  return `${prefix}-${datePart}-${id.toString().toUpperCase()}`;
+}
+
 function paging(query, filter) {
   const { page, limit } = query;
   return { page, limit, skip: (page - 1) * limit, filter };
@@ -119,6 +124,33 @@ function lineItemsTotal(lines) {
   return money(lines.reduce((sum, line) => sum + line.lineTotal, 0));
 }
 
+function isEarlyClose(expiryDate, now) {
+  return !expiryDate || now < expiryDate;
+}
+
+function hasExpired(expiryDate, now) {
+  return Boolean(expiryDate && expiryDate <= now);
+}
+
+function scopedCustomerId(ownerId, requestedId) {
+  return ownerId || requestedId;
+}
+
+function billingRetryMatches(existingEvent, { billedAt, externalInvoiceId }) {
+  if (billedAt && existingEvent.billedAt.getTime() !== billedAt.getTime()) return false;
+  if (externalInvoiceId !== undefined && existingEvent.externalInvoiceId !== externalInvoiceId) return false;
+  return true;
+}
+
+function savedFrequencyFilter(frequency, matchingPlanIds = []) {
+  return {
+    $or: [
+      { billingFrequency: frequency },
+      { billingFrequency: null, planId: { $in: matchingPlanIds } }
+    ]
+  };
+}
+
 function dueBillingFilter({ asOf, planId, frequency, matchingPlanIds = [] }) {
   const filter = {
     status: 'active',
@@ -130,12 +162,7 @@ function dueBillingFilter({ asOf, planId, frequency, matchingPlanIds = [] }) {
     { $or: [{ expiryDate: null }, { expiryDate: { $gt: asOf } }] }
   ];
   if (frequency) {
-    conditions.push({
-      $or: [
-        { billingFrequency: frequency },
-        { billingFrequency: null, planId: { $in: matchingPlanIds } }
-      ]
-    });
+    conditions.push(savedFrequencyFilter(frequency, matchingPlanIds));
   }
   filter.$and = conditions;
   return filter;
@@ -158,7 +185,7 @@ async function createSubscriptionRecord({
   const startsAt = startDate || new Date();
   if (expiryDate && expiryDate <= startsAt) fail(422, 'expiryDate must be after startDate');
   const subscription = new Subscription({
-    subscriptionNumber: `SUB-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}-${new mongoose.Types.ObjectId().toString().slice(-8).toUpperCase()}`,
+    subscriptionNumber: createDocumentNumber('SUB'),
     customerId,
     planId: plan._id,
     billingFrequency: plan.frequency,
@@ -547,7 +574,7 @@ async function createQuotation(input, actorId) {
     const validityDays = input.validityDays || (template && template.validityDays) || 30;
     const expiresAt = new Date(now.getTime() + validityDays * 86400000);
     const quotation = new Quotation({
-      quotationNumber: `QUO-${now.toISOString().slice(0, 10).replace(/-/g, '')}-${new mongoose.Types.ObjectId().toString().slice(-8).toUpperCase()}`,
+      quotationNumber: createDocumentNumber('QUO', now),
       templateId: template ? template._id : null,
       customerId: input.customerId,
       planId: plan._id,
@@ -583,9 +610,9 @@ async function createQuotation(input, actorId) {
 
 async function listQuotations(query, { customerId } = {}) {
   const filter = {};
-  if (customerId) filter.customerId = customerId;
+  const requestedCustomerId = scopedCustomerId(customerId, query.customerId);
+  if (requestedCustomerId) filter.customerId = requestedCustomerId;
   if (query.status) filter.status = query.status;
-  if (query.customerId) filter.customerId = query.customerId;
   if (query.planId) filter.planId = query.planId;
   if (query.frequency) {
     const plans = await Plan.find({ frequency: query.frequency }).select('_id').lean();
@@ -595,8 +622,7 @@ async function listQuotations(query, { customerId } = {}) {
       : { $in: ids };
   }
   await expireOpenQuotations({
-    ...(customerId ? { customerId } : {}),
-    ...(query.customerId ? { customerId: query.customerId } : {})
+    ...(requestedCustomerId ? { customerId: requestedCustomerId } : {})
   });
   if (query.from || query.to) {
     filter.createdAt = {};
@@ -704,6 +730,23 @@ async function confirmQuotation(id, actorId) {
     if (quotation.subscriptionId && (!linkedSubscription || linkedSubscription.status !== 'quotation')) {
       fail(409, 'Linked subscription is not awaiting confirmation');
     }
+    if (linkedSubscription && hasExpired(linkedSubscription.expiryDate, now)) {
+      quotation.status = 'expired';
+      await quotation.save({ session });
+      linkedSubscription.status = 'expired';
+      linkedSubscription.closedAt = linkedSubscription.expiryDate;
+      await linkedSubscription.save({ session });
+      await addHistory(
+        linkedSubscription._id,
+        'subscription-expired-before-confirmation',
+        'quotation',
+        'expired',
+        actorId,
+        { expiryDate: linkedSubscription.expiryDate },
+        session
+      );
+      return { expiredSubscription: true };
+    }
     activeAvailability(plan, linkedSubscription ? linkedSubscription.startDate : now);
     quotation.status = 'confirmed';
     quotation.confirmedAt = now;
@@ -716,6 +759,9 @@ async function confirmQuotation(id, actorId) {
     return quotation;
   });
   if (result.expired) fail(409, 'Quotation has expired');
+  if (result.expiredSubscription) {
+    fail(409, 'The linked subscription expired before quotation confirmation');
+  }
   return result;
 }
 
@@ -733,7 +779,7 @@ async function createQuotationFromSubscription(id, { validityDays, notes }, acto
     const items = await SubscriptionItem.find({ subscriptionId: id }).session(session).sort({ createdAt: 1 }).lean();
     const now = new Date();
     const quotation = new Quotation({
-      quotationNumber: `QUO-${now.toISOString().slice(0, 10).replace(/-/g, '')}-${new mongoose.Types.ObjectId().toString().slice(-8).toUpperCase()}`,
+      quotationNumber: createDocumentNumber('QUO', now),
       customerId: subscription.customerId,
       planId: subscription.planId,
       items,
@@ -825,18 +871,15 @@ async function updateSubscription(id, input, { customerId, actorId }) {
 }
 
 async function listSubscriptions(query, { customerId } = {}) {
-  await expireSubscriptions(customerId ? { customerId } : {});
+  const requestedCustomerId = scopedCustomerId(customerId, query.customerId);
+  await expireSubscriptions(requestedCustomerId ? { customerId: requestedCustomerId } : {});
   const filter = {};
-  if (customerId) filter.customerId = customerId;
-  if (query.customerId) filter.customerId = query.customerId;
+  if (requestedCustomerId) filter.customerId = requestedCustomerId;
   if (query.status) filter.status = query.status;
   if (query.planId) filter.planId = query.planId;
   if (query.frequency) {
     const plans = await Plan.find({ frequency: query.frequency }).select('_id').lean();
-    const ids = plans.map((plan) => plan._id);
-    filter.planId = query.planId
-      ? { $in: ids.filter((id) => id.toString() === query.planId) }
-      : { $in: ids };
+    filter.$and = [savedFrequencyFilter(query.frequency, plans.map((plan) => plan._id))];
   }
   if (query.from || query.to) {
     filter.startDate = {};
@@ -959,8 +1002,9 @@ async function transitionSubscription(id, action, actorId, { customerId } = {}) 
       if (!['confirmed', 'active', 'paused'].includes(previous)) {
         fail(409, 'Only confirmed, active, or paused subscriptions can be closed');
       }
-      const isEarly = subscription.expiryDate && now < subscription.expiryDate;
-      if (isEarly && !plan.earlyCloseAllowed) fail(403, 'Early close is not allowed by this plan');
+      if (isEarlyClose(subscription.expiryDate, now) && !plan.earlyCloseAllowed) {
+        fail(403, 'Early close is not allowed by this plan');
+      }
       subscription.status = 'closed';
       subscription.closedAt = now;
     } else if (action === 'renew') {
@@ -1012,6 +1056,9 @@ async function recordBilling(id, { idempotencyKey, billedAt, externalInvoiceId }
       .session(session)
       .lean();
     if (existingEvent) {
+      if (!billingRetryMatches(existingEvent, { billedAt, externalInvoiceId })) {
+        fail(409, 'Idempotency key was already used with different billing details');
+      }
       return {
         alreadyRecorded: true,
         billingEvent: existingEvent,
@@ -1080,6 +1127,12 @@ module.exports = {
   ServiceError,
   fail,
   money,
+  createDocumentNumber,
+  isEarlyClose,
+  hasExpired,
+  scopedCustomerId,
+  billingRetryMatches,
+  savedFrequencyFilter,
   dueBillingFilter,
   listProducts,
   getProduct,

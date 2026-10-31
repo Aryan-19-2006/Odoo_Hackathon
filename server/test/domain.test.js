@@ -3,12 +3,21 @@ const assert = require('node:assert/strict');
 const { addBillingPeriod } = require('../src/modules/subscriptions/billingDates');
 const validation = require('../src/modules/shared/validation');
 const { createApp } = require('../src/app');
+const { createAuthenticatedIdentity } = require('../src/middleware/requireFirebaseAuth');
 const {
   requireStaffPermission,
   authorizeOwnAction,
   assertCustomerCanRequest
 } = require('../src/middleware/access');
-const { dueBillingFilter } = require('../src/modules/shared/service');
+const {
+  createDocumentNumber,
+  dueBillingFilter,
+  isEarlyClose,
+  hasExpired,
+  scopedCustomerId,
+  billingRetryMatches,
+  savedFrequencyFilter
+} = require('../src/modules/shared/service');
 
 test('daily and weekly billing periods use exact UTC day increments', () => {
   const start = new Date('2024-01-01T10:15:00.000Z');
@@ -52,6 +61,59 @@ test('due billing frequency filters use snapshots and fall back only for legacy 
       }
     ]
   });
+});
+
+test('subscription frequency filters prefer snapshots over current plan settings', () => {
+  const legacyPlanId = '507f1f77bcf86cd799439011';
+  assert.deepEqual(savedFrequencyFilter('monthly', [legacyPlanId]), {
+    $or: [
+      { billingFrequency: 'monthly' },
+      { billingFrequency: null, planId: { $in: [legacyPlanId] } }
+    ]
+  });
+});
+
+test('closing a non-expiring subscription is considered an early close', () => {
+  const now = new Date('2025-03-01T00:00:00.000Z');
+  assert.equal(isEarlyClose(null, now), true);
+  assert.equal(isEarlyClose(new Date('2025-03-02T00:00:00.000Z'), now), true);
+  assert.equal(isEarlyClose(new Date('2025-02-28T00:00:00.000Z'), now), false);
+});
+
+test('subscription expiry is inclusive at the expiry timestamp', () => {
+  const expiry = new Date('2025-03-01T00:00:00.000Z');
+  assert.equal(hasExpired(null, expiry), false);
+  assert.equal(hasExpired(new Date('2025-03-01T00:00:00.001Z'), expiry), false);
+  assert.equal(hasExpired(expiry, expiry), true);
+});
+
+test('authenticated customer ownership overrides requested customer filters', () => {
+  assert.equal(scopedCustomerId('customer-1', 'customer-2'), 'customer-1');
+  assert.equal(scopedCustomerId('customer-1', undefined), 'customer-1');
+  assert.equal(scopedCustomerId(undefined, 'customer-2'), 'customer-2');
+});
+
+test('billing idempotency retries reject changed invoice or billed time details', () => {
+  const event = {
+    billedAt: new Date('2025-03-01T10:00:00.000Z'),
+    externalInvoiceId: 'INV-100'
+  };
+  assert.equal(billingRetryMatches(event, {}), true);
+  assert.equal(billingRetryMatches(event, {
+    billedAt: new Date('2025-03-01T10:00:00.000Z'),
+    externalInvoiceId: 'INV-100'
+  }), true);
+  assert.equal(billingRetryMatches(event, { externalInvoiceId: 'INV-101' }), false);
+  assert.equal(billingRetryMatches(event, { billedAt: new Date('2025-03-01T10:01:00.000Z') }), false);
+});
+
+test('document numbers retain the full unique identifier suffix', () => {
+  const date = new Date('2025-03-01T00:00:00.000Z');
+  const first = createDocumentNumber('SUB', date, '507f1f77bcf86cd799123456');
+  const second = createDocumentNumber('SUB', date, '507f1f77bcf86cde99123456');
+
+  assert.equal(first, 'SUB-20250301-507F1F77BCF86CD799123456');
+  assert.notEqual(first, second);
 });
 
 test('unsupported billing frequencies and invalid dates are rejected', () => {
@@ -231,4 +293,35 @@ test('customers may create quotations only with own permission and matching owne
     status: 403,
     message: 'You cannot change subscription or quotation ownership'
   });
+});
+
+test('Firebase identity forwards verified permissions and customer ownership claims', () => {
+  const user = {
+    _id: { toString: () => 'user-123' },
+    firebaseUid: 'firebase-uid',
+    email: 'customer@example.com',
+    role: 'customer',
+    isActive: true
+  };
+
+  const identity = createAuthenticatedIdentity(user, {
+    email_verified: true,
+    permissions: ['subscriptions:create:own', 42],
+    customerId: 'customer-456'
+  });
+
+  assert.deepEqual(identity, {
+    id: 'user-123',
+    firebaseUid: 'firebase-uid',
+    email: 'customer@example.com',
+    role: 'customer',
+    isActive: true,
+    emailVerified: true,
+    permissions: ['subscriptions:create:own'],
+    customerId: 'customer-456'
+  });
+
+  const identityWithoutClaims = createAuthenticatedIdentity(user, {});
+  assert.deepEqual(identityWithoutClaims.permissions, []);
+  assert.equal('customerId' in identityWithoutClaims, false);
 });
