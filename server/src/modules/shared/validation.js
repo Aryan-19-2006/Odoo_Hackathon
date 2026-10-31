@@ -1,8 +1,12 @@
 const { z } = require('zod');
 
 const objectId = z.string().regex(/^[a-f\d]{24}$/i, 'Must be a valid MongoDB ID');
-const optionalDate = z.coerce.date().optional();
-const nullableDate = z.union([z.null(), z.coerce.date()]).optional();
+const dateInput = z.preprocess(
+  (value) => (typeof value === 'string' || value instanceof Date ? value : undefined),
+  z.coerce.date()
+);
+const optionalDate = dateInput.optional();
+const nullableDate = z.union([z.null(), dateInput]).optional();
 const status = (values) => z.enum(values);
 
 const variantInput = z.object({
@@ -38,7 +42,11 @@ const planInput = z.object({
   pauseAllowed: z.boolean().default(false),
   renewalAllowed: z.boolean().default(true),
   status: status(['active', 'inactive', 'archived']).optional()
-}).refine((value) => !value.availableFrom || !value.availableTo || value.availableTo >= value.availableFrom, {
+}).refine((value) => (
+  !(value.availableFrom instanceof Date) ||
+  !(value.availableTo instanceof Date) ||
+  value.availableTo >= value.availableFrom
+), {
   message: 'availableTo must be on or after availableFrom',
   path: ['availableTo']
 }).refine((value) => !value.autoClose || value.autoCloseAfterCycles !== undefined, {

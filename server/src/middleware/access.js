@@ -36,7 +36,7 @@ function requirePermission(permission) {
 function requireStaffPermission(permission) {
   return (req, res, next) => {
     if (!identity(req)) return next(new ServiceError(401, 'Authenticated user identity is missing'));
-    if (role(req) === 'admin' || (role(req) === 'staff' && hasPermission(req, permission))) {
+    if (role(req) !== 'customer' && hasPermission(req, permission)) {
       return next();
     }
     return next(new ServiceError(403, 'You do not have permission to perform this action'));

@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const { addBillingPeriod } = require('../src/modules/subscriptions/billingDates');
 const validation = require('../src/modules/shared/validation');
 const { createApp } = require('../src/app');
+const { requireStaffPermission } = require('../src/middleware/access');
 
 test('daily and weekly billing periods use exact UTC day increments', () => {
   const start = new Date('2024-01-01T10:15:00.000Z');
@@ -65,6 +66,25 @@ test('optional plan dates and subscription expiry can be explicitly cleared', ()
   assert.equal(subscription.data.expiryDate, null);
 });
 
+test('date validation rejects null and non-date values instead of coercing them to epoch', () => {
+  const validId = '507f1f77bcf86cd799439011';
+  const subscription = validation.subscriptionInput.safeParse({
+    customerId: 'customer-1',
+    planId: validId,
+    startDate: null,
+    items: [{ productId: validId, quantity: 1 }]
+  });
+  assert.equal(subscription.success, false);
+
+  const plan = validation.planInput.safeParse({
+    name: 'Monthly',
+    frequency: 'monthly',
+    productIds: [validId],
+    availableFrom: 12345
+  });
+  assert.equal(plan.success, false);
+});
+
 test('subscription validation requires line items and a valid plan reference', () => {
   const result = validation.subscriptionInput.safeParse({
     planId: 'not-an-object-id',
@@ -98,6 +118,7 @@ test('API composition requires authentication middleware and denies unauthentica
       res.status(401).json({ error: 'Unauthenticated' });
     }
   });
+
   const server = app.listen(0);
   try {
     await new Promise((resolve) => server.once('listening', resolve));
@@ -114,6 +135,7 @@ test('API composition requires authentication middleware and denies unauthentica
       next();
     }
   });
+
   const restrictedServer = restrictedApp.listen(0);
   try {
     await new Promise((resolve) => restrictedServer.once('listening', resolve));
@@ -123,4 +145,27 @@ test('API composition requires authentication middleware and denies unauthentica
     restrictedServer.closeAllConnections();
     await new Promise((resolve, reject) => restrictedServer.close((error) => error ? reject(error) : resolve()));
   }
+});
+
+test('staff module permissions are enforced independently of the exact staff role label', () => {
+  let allowed = false;
+  requireStaffPermission('products:manage')(
+    { user: { id: 'manager-1', role: 'manager', permissions: ['products:manage'] } },
+    {},
+    (error) => {
+      assert.equal(error, undefined);
+      allowed = true;
+    }
+  );
+  assert.equal(allowed, true);
+
+  let deniedStatus;
+  requireStaffPermission('products:manage')(
+    { user: { id: 'staff-1', role: 'staff', permissions: [] } },
+    {},
+    (error) => {
+      deniedStatus = error.status;
+    }
+  );
+  assert.equal(deniedStatus, 403);
 });

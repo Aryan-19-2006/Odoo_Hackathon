@@ -5,6 +5,11 @@ const subscriptionSchema = new Schema(
     subscriptionNumber: { type: String, required: true, unique: true, index: true },
     customerId: { type: String, required: true, index: true },
     planId: { type: Schema.Types.ObjectId, ref: 'Plan', required: true },
+    billingFrequency: {
+      type: String,
+      enum: ['daily', 'weekly', 'monthly', 'yearly'],
+      default: null
+    },
     quotationId: { type: Schema.Types.ObjectId, ref: 'Quotation', default: null },
     startDate: { type: Date, required: true },
     billingAnchorDate: {

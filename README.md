@@ -19,7 +19,13 @@ MEMBER1_AUTH_MODULE=<absolute path to Member 1's CommonJS module>
 PORT=3000
 ```
 
-The root `.env.example` lists the same variable names; the process manager or shell must supply them to Node.
+Copy the root environment template and fill in the values:
+
+```powershell
+Copy-Item ..\.env.example ..\.env
+```
+
+The server loads the root `.env` file on startup. A process manager or shell may also supply these variables; externally supplied values take precedence.
 
 The Member 1 module must export an Express `authenticate` middleware. It must attach `req.user` with a stable `id` (or `_id`/`uid`), `role`, a `permissions` array, and `customerId` for customer accounts. This implementation intentionally does not create or verify Firebase credentials itself. Permission names and request/response contracts are listed in [docs/api-contracts.md](./docs/api-contracts.md).
 

@@ -139,6 +139,7 @@ async function createSubscriptionRecord({
     subscriptionNumber: `SUB-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}-${new mongoose.Types.ObjectId().toString().slice(-8).toUpperCase()}`,
     customerId,
     planId: plan._id,
+    billingFrequency: plan.frequency,
     quotationId: quotationId || null,
     startDate: startsAt,
     billingAnchorDate: startsAt,
@@ -621,6 +622,7 @@ async function updateQuotation(id, input, { customerId } = {}) {
     if (!items && input.planId && input.planId !== quotation.planId.toString()) {
       await validatePlanProducts(plan, quotation.items);
     }
+    const previousPlanId = quotation.planId.toString();
     Object.assign(quotation, input, { ...(items ? { items } : {}), planId });
     if (items) quotation.totalAmount = lineItemsTotal(items);
     if (input.validityDays) {
@@ -630,7 +632,8 @@ async function updateQuotation(id, input, { customerId } = {}) {
 
     if (linkedSubscription) {
       linkedSubscription.planId = planId;
-      if (planId.toString() !== quotation.planId.toString()) {
+      if (planId.toString() !== previousPlanId) {
+        linkedSubscription.billingFrequency = plan.frequency;
         linkedSubscription.billingAnchorDate = linkedSubscription.startDate;
         linkedSubscription.nextBillingDate = addBillingPeriod(
           linkedSubscription.startDate,
@@ -775,9 +778,11 @@ async function updateSubscription(id, input, { customerId, actorId }) {
     }
     if (input.startDate) {
       subscription.startDate = input.startDate;
+      subscription.billingFrequency = plan.frequency;
       subscription.billingAnchorDate = input.startDate;
       subscription.nextBillingDate = addBillingPeriod(input.startDate, plan.frequency, input.startDate);
     } else if (input.planId && input.planId !== subscription.planId.toString()) {
+      subscription.billingFrequency = plan.frequency;
       subscription.billingAnchorDate = subscription.startDate;
       subscription.nextBillingDate = addBillingPeriod(subscription.startDate, plan.frequency, subscription.startDate);
     }
@@ -867,7 +872,7 @@ async function listDueForBilling(query) {
     subscriptionNumber: subscription.subscriptionNumber,
     customerId: subscription.customerId,
     planId: subscription.planId,
-    frequency: planMap.get(subscription.planId.toString())?.frequency || null,
+    frequency: subscription.billingFrequency || planMap.get(subscription.planId.toString())?.frequency || null,
     startDate: subscription.startDate,
     expiryDate: subscription.expiryDate,
     nextBillingDate: subscription.nextBillingDate,
@@ -902,6 +907,7 @@ async function transitionSubscription(id, action, actorId, { customerId } = {}) 
     if (!plan) fail(409, 'The subscription plan no longer exists');
     const previous = subscription.status;
     const now = new Date();
+    subscription.billingFrequency = subscription.billingFrequency || plan.frequency;
 
     if (action === 'activate') {
       if (previous !== 'confirmed') fail(409, 'Only confirmed subscriptions can be activated');
@@ -942,17 +948,26 @@ async function transitionSubscription(id, action, actorId, { customerId } = {}) 
       if (previous !== 'active') {
         const currentBase = subscription.nextBillingDate > now ? subscription.nextBillingDate : now;
         subscription.billingAnchorDate = currentBase;
-        subscription.nextBillingDate = addBillingPeriod(currentBase, plan.frequency, currentBase);
+        const frequency = subscription.billingFrequency || plan.frequency;
+        subscription.billingFrequency = frequency;
+        subscription.nextBillingDate = addBillingPeriod(currentBase, frequency, currentBase);
       } else if (subscription.nextBillingDate <= now) {
+        const frequency = subscription.billingFrequency || plan.frequency;
+        subscription.billingFrequency = frequency;
         subscription.nextBillingDate = addBillingPeriod(
           subscription.nextBillingDate,
-          plan.frequency,
+          frequency,
           subscription.billingAnchorDate || subscription.startDate
         );
       }
       if (subscription.expiryDate) {
         const expiryBase = subscription.expiryDate > now ? subscription.expiryDate : now;
-        subscription.expiryDate = addBillingPeriod(expiryBase, plan.frequency);
+        const frequency = subscription.billingFrequency || plan.frequency;
+        subscription.expiryDate = addBillingPeriod(
+          expiryBase,
+          frequency,
+          subscription.billingAnchorDate || subscription.startDate
+        );
       }
       subscription.status = 'active';
       subscription.closedAt = null;
@@ -990,9 +1005,11 @@ async function recordBilling(id, { idempotencyKey, billedAt, externalInvoiceId }
     if (subscription.expiryDate && subscription.expiryDate <= billedTime) fail(409, 'Subscription has expired');
 
     const periodStart = subscription.nextBillingDate;
+    const frequency = subscription.billingFrequency || plan.frequency;
+    subscription.billingFrequency = frequency;
     const periodEnd = addBillingPeriod(
       periodStart,
-      plan.frequency,
+      frequency,
       subscription.billingAnchorDate || subscription.startDate
     );
     const [event] = await SubscriptionBillingEvent.create(
