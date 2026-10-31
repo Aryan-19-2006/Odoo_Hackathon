@@ -44,7 +44,8 @@ router.post('/subscriptions/:id/quotation', authorizeOwnAction('subscriptions:up
   res.status(201).json(await service.createQuotationFromSubscription(
     req.params.id,
     parse(validation.subscriptionQuoteInput, req.body || {}),
-    identity(req)
+    identity(req),
+    { customerId: roleIsCustomer(req) ? assertCustomerCanRequest(req) : undefined }
   ));
 }));
 router.get('/subscriptions/:id/history', authorizeRead('subscriptions:read', true), asyncRoute(async (req, res) => {

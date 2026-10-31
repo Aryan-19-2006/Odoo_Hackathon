@@ -1,6 +1,6 @@
-require("dotenv").config();
-
 const path = require("node:path");
+require("dotenv").config({ path: path.resolve(__dirname, "../../.env") });
+
 const { createApp } = require("./app");
 const { connectDatabase } = require("./config/database");
 const { requireFirebaseAuth } = require("./middleware/requireFirebaseAuth");
@@ -9,6 +9,7 @@ const { initializeFirebaseAdmin } = require("./modules/auth/firebaseAdmin");
 function getAuthenticateMiddleware() {
   const authModulePath = process.env.MEMBER1_AUTH_MODULE;
   if (!authModulePath) {
+    initializeFirebaseAdmin();
     return requireFirebaseAuth;
   }
 
@@ -24,7 +25,6 @@ function getAuthenticateMiddleware() {
 
 async function start() {
   const authenticate = getAuthenticateMiddleware();
-  initializeFirebaseAdmin();
   await connectDatabase();
 
   const port = Number(process.env.PORT || 3000);

@@ -38,8 +38,10 @@ router.get('/quotations', authorizeRead('quotations:read', true), asyncRoute(asy
     customerId: roleIsCustomer(req) ? customerId(req) : undefined
   }));
 }));
-router.post('/quotations', requireStaffPermission('quotations:manage'), asyncRoute(async (req, res) => {
-  res.status(201).json(await service.createQuotation(parse(validation.quotationInput, req.body), identity(req)));
+router.post('/quotations', authorizeOwnAction('quotations:manage'), asyncRoute(async (req, res) => {
+  const input = parse(validation.quotationInput, req.body);
+  if (roleIsCustomer(req)) input.customerId = assertCustomerCanRequest(req, input.customerId);
+  res.status(201).json(await service.createQuotation(input, identity(req)));
 }));
 router.get('/quotations/:id', authorizeRead('quotations:read', true), asyncRoute(async (req, res) => {
   res.json(await service.getQuotation(req.params.id, {

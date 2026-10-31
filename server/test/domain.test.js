@@ -3,6 +3,12 @@ const assert = require('node:assert/strict');
 const { addBillingPeriod } = require('../src/modules/subscriptions/billingDates');
 const validation = require('../src/modules/shared/validation');
 const { createApp } = require('../src/app');
+const {
+  requireStaffPermission,
+  authorizeOwnAction,
+  assertCustomerCanRequest
+} = require('../src/middleware/access');
+const { dueBillingFilter } = require('../src/modules/shared/service');
 
 test('daily and weekly billing periods use exact UTC day increments', () => {
   const start = new Date('2024-01-01T10:15:00.000Z');
@@ -22,6 +28,30 @@ test('yearly billing clamps leap day in a non-leap year', () => {
     addBillingPeriod(new Date('2024-02-29T00:00:00.000Z'), 'yearly').toISOString(),
     '2025-02-28T00:00:00.000Z'
   );
+});
+
+test('due billing frequency filters use snapshots and fall back only for legacy subscriptions', () => {
+  const asOf = new Date('2025-03-01T00:00:00.000Z');
+  const legacyMonthlyPlanId = '507f1f77bcf86cd799439011';
+  const filter = dueBillingFilter({
+    asOf,
+    frequency: 'monthly',
+    matchingPlanIds: [legacyMonthlyPlanId]
+  });
+
+  assert.deepEqual(filter, {
+    status: 'active',
+    nextBillingDate: { $lte: asOf },
+    $and: [
+      { $or: [{ expiryDate: null }, { expiryDate: { $gt: asOf } }] },
+      {
+        $or: [
+          { billingFrequency: 'monthly' },
+          { billingFrequency: null, planId: { $in: [legacyMonthlyPlanId] } }
+        ]
+      }
+    ]
+  });
 });
 
 test('unsupported billing frequencies and invalid dates are rejected', () => {
@@ -65,6 +95,25 @@ test('optional plan dates and subscription expiry can be explicitly cleared', ()
   assert.equal(subscription.data.expiryDate, null);
 });
 
+test('date validation rejects null and non-date values instead of coercing them to epoch', () => {
+  const validId = '507f1f77bcf86cd799439011';
+  const subscription = validation.subscriptionInput.safeParse({
+    customerId: 'customer-1',
+    planId: validId,
+    startDate: null,
+    items: [{ productId: validId, quantity: 1 }]
+  });
+  assert.equal(subscription.success, false);
+
+  const plan = validation.planInput.safeParse({
+    name: 'Monthly',
+    frequency: 'monthly',
+    productIds: [validId],
+    availableFrom: 12345
+  });
+  assert.equal(plan.success, false);
+});
+
 test('subscription validation requires line items and a valid plan reference', () => {
   const result = validation.subscriptionInput.safeParse({
     planId: 'not-an-object-id',
@@ -98,6 +147,7 @@ test('API composition requires authentication middleware and denies unauthentica
       res.status(401).json({ error: 'Unauthenticated' });
     }
   });
+
   const server = app.listen(0);
   try {
     await new Promise((resolve) => server.once('listening', resolve));
@@ -114,6 +164,7 @@ test('API composition requires authentication middleware and denies unauthentica
       next();
     }
   });
+
   const restrictedServer = restrictedApp.listen(0);
   try {
     await new Promise((resolve) => restrictedServer.once('listening', resolve));
@@ -123,4 +174,61 @@ test('API composition requires authentication middleware and denies unauthentica
     restrictedServer.closeAllConnections();
     await new Promise((resolve, reject) => restrictedServer.close((error) => error ? reject(error) : resolve()));
   }
+});
+
+test('staff module permissions are enforced independently of the exact staff role label', () => {
+  let allowed = false;
+  requireStaffPermission('products:manage')(
+    { user: { id: 'manager-1', role: 'manager', permissions: ['products:manage'] } },
+    {},
+    (error) => {
+      assert.equal(error, undefined);
+      allowed = true;
+    }
+  );
+  assert.equal(allowed, true);
+
+  let deniedStatus;
+  requireStaffPermission('products:manage')(
+    { user: { id: 'staff-1', role: 'staff', permissions: [] } },
+    {},
+    (error) => {
+      deniedStatus = error.status;
+    }
+  );
+  assert.equal(deniedStatus, 403);
+});
+
+test('customers may create quotations only with own permission and matching ownership', () => {
+  let allowed = false;
+  authorizeOwnAction('quotations:manage')(
+    {
+      user: {
+        id: 'customer-user-1',
+        customerId: 'customer-1',
+        role: 'customer',
+        permissions: ['quotations:manage:own']
+      }
+    },
+    {},
+    (error) => {
+      assert.equal(error, undefined);
+      allowed = true;
+    }
+  );
+  assert.equal(allowed, true);
+
+  const req = {
+    user: {
+      id: 'customer-user-1',
+      customerId: 'customer-1',
+      role: 'customer',
+      permissions: ['quotations:manage:own']
+    }
+  };
+  assert.equal(assertCustomerCanRequest(req, 'customer-1'), 'customer-1');
+  assert.throws(() => assertCustomerCanRequest(req, 'customer-2'), {
+    status: 403,
+    message: 'You cannot change subscription or quotation ownership'
+  });
 });

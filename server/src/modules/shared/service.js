@@ -119,6 +119,28 @@ function lineItemsTotal(lines) {
   return money(lines.reduce((sum, line) => sum + line.lineTotal, 0));
 }
 
+function dueBillingFilter({ asOf, planId, frequency, matchingPlanIds = [] }) {
+  const filter = {
+    status: 'active',
+    nextBillingDate: { $lte: asOf }
+  };
+  if (planId) filter.planId = planId;
+
+  const conditions = [
+    { $or: [{ expiryDate: null }, { expiryDate: { $gt: asOf } }] }
+  ];
+  if (frequency) {
+    conditions.push({
+      $or: [
+        { billingFrequency: frequency },
+        { billingFrequency: null, planId: { $in: matchingPlanIds } }
+      ]
+    });
+  }
+  filter.$and = conditions;
+  return filter;
+}
+
 async function createSubscriptionRecord({
   customerId,
   plan,
@@ -139,6 +161,7 @@ async function createSubscriptionRecord({
     subscriptionNumber: `SUB-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}-${new mongoose.Types.ObjectId().toString().slice(-8).toUpperCase()}`,
     customerId,
     planId: plan._id,
+    billingFrequency: plan.frequency,
     quotationId: quotationId || null,
     startDate: startsAt,
     billingAnchorDate: startsAt,
@@ -621,6 +644,7 @@ async function updateQuotation(id, input, { customerId } = {}) {
     if (!items && input.planId && input.planId !== quotation.planId.toString()) {
       await validatePlanProducts(plan, quotation.items);
     }
+    const previousPlanId = quotation.planId.toString();
     Object.assign(quotation, input, { ...(items ? { items } : {}), planId });
     if (items) quotation.totalAmount = lineItemsTotal(items);
     if (input.validityDays) {
@@ -630,7 +654,8 @@ async function updateQuotation(id, input, { customerId } = {}) {
 
     if (linkedSubscription) {
       linkedSubscription.planId = planId;
-      if (planId.toString() !== quotation.planId.toString()) {
+      if (planId.toString() !== previousPlanId) {
+        linkedSubscription.billingFrequency = plan.frequency;
         linkedSubscription.billingAnchorDate = linkedSubscription.startDate;
         linkedSubscription.nextBillingDate = addBillingPeriod(
           linkedSubscription.startDate,
@@ -694,10 +719,13 @@ async function confirmQuotation(id, actorId) {
   return result;
 }
 
-async function createQuotationFromSubscription(id, { validityDays, notes }, actorId) {
+async function createQuotationFromSubscription(id, { validityDays, notes }, actorId, { customerId } = {}) {
   if (!mongoose.isValidObjectId(id)) fail(404, 'Subscription not found');
   return transaction(async (session) => {
-    const subscription = await Subscription.findById(id).session(session);
+    const subscription = await Subscription.findOne({
+      _id: id,
+      ...(customerId ? { customerId } : {})
+    }).session(session);
     if (!subscription) fail(404, 'Subscription not found');
     if (subscription.status !== 'draft') fail(409, 'Only draft subscriptions can be sent as quotations');
     const plan = await Plan.findById(subscription.planId).session(session);
@@ -775,9 +803,11 @@ async function updateSubscription(id, input, { customerId, actorId }) {
     }
     if (input.startDate) {
       subscription.startDate = input.startDate;
+      subscription.billingFrequency = plan.frequency;
       subscription.billingAnchorDate = input.startDate;
       subscription.nextBillingDate = addBillingPeriod(input.startDate, plan.frequency, input.startDate);
     } else if (input.planId && input.planId !== subscription.planId.toString()) {
+      subscription.billingFrequency = plan.frequency;
       subscription.billingAnchorDate = subscription.startDate;
       subscription.nextBillingDate = addBillingPeriod(subscription.startDate, plan.frequency, subscription.startDate);
     }
@@ -837,19 +867,17 @@ async function listSubscriptions(query, { customerId } = {}) {
 async function listDueForBilling(query) {
   const asOf = query.asOf || new Date();
   if (asOf >= new Date()) await expireSubscriptions();
-  const filter = {
-    status: 'active',
-    nextBillingDate: { $lte: asOf },
-    $or: [{ expiryDate: null }, { expiryDate: { $gt: asOf } }]
-  };
-  if (query.planId) filter.planId = query.planId;
+  let matchingPlanIds = [];
   if (query.frequency) {
     const plans = await Plan.find({ frequency: query.frequency }).select('_id').lean();
-    const ids = plans.map((plan) => plan._id);
-    filter.planId = query.planId
-      ? { $in: ids.filter((id) => id.toString() === query.planId) }
-      : { $in: ids };
+    matchingPlanIds = plans.map((plan) => plan._id);
   }
+  const filter = dueBillingFilter({
+    asOf,
+    planId: query.planId,
+    frequency: query.frequency,
+    matchingPlanIds
+  });
   const result = await paged(Subscription, query, filter, { nextBillingDate: 1, _id: 1 });
   const subscriptionIds = result.results.map((subscription) => subscription._id);
   const [items, plans] = await Promise.all([
@@ -867,7 +895,7 @@ async function listDueForBilling(query) {
     subscriptionNumber: subscription.subscriptionNumber,
     customerId: subscription.customerId,
     planId: subscription.planId,
-    frequency: planMap.get(subscription.planId.toString())?.frequency || null,
+    frequency: subscription.billingFrequency || planMap.get(subscription.planId.toString())?.frequency || null,
     startDate: subscription.startDate,
     expiryDate: subscription.expiryDate,
     nextBillingDate: subscription.nextBillingDate,
@@ -902,6 +930,7 @@ async function transitionSubscription(id, action, actorId, { customerId } = {}) 
     if (!plan) fail(409, 'The subscription plan no longer exists');
     const previous = subscription.status;
     const now = new Date();
+    subscription.billingFrequency = subscription.billingFrequency || plan.frequency;
 
     if (action === 'activate') {
       if (previous !== 'confirmed') fail(409, 'Only confirmed subscriptions can be activated');
@@ -942,17 +971,26 @@ async function transitionSubscription(id, action, actorId, { customerId } = {}) 
       if (previous !== 'active') {
         const currentBase = subscription.nextBillingDate > now ? subscription.nextBillingDate : now;
         subscription.billingAnchorDate = currentBase;
-        subscription.nextBillingDate = addBillingPeriod(currentBase, plan.frequency, currentBase);
+        const frequency = subscription.billingFrequency || plan.frequency;
+        subscription.billingFrequency = frequency;
+        subscription.nextBillingDate = addBillingPeriod(currentBase, frequency, currentBase);
       } else if (subscription.nextBillingDate <= now) {
+        const frequency = subscription.billingFrequency || plan.frequency;
+        subscription.billingFrequency = frequency;
         subscription.nextBillingDate = addBillingPeriod(
           subscription.nextBillingDate,
-          plan.frequency,
+          frequency,
           subscription.billingAnchorDate || subscription.startDate
         );
       }
       if (subscription.expiryDate) {
         const expiryBase = subscription.expiryDate > now ? subscription.expiryDate : now;
-        subscription.expiryDate = addBillingPeriod(expiryBase, plan.frequency);
+        const frequency = subscription.billingFrequency || plan.frequency;
+        subscription.expiryDate = addBillingPeriod(
+          expiryBase,
+          frequency,
+          subscription.billingAnchorDate || subscription.startDate
+        );
       }
       subscription.status = 'active';
       subscription.closedAt = null;
@@ -990,9 +1028,11 @@ async function recordBilling(id, { idempotencyKey, billedAt, externalInvoiceId }
     if (subscription.expiryDate && subscription.expiryDate <= billedTime) fail(409, 'Subscription has expired');
 
     const periodStart = subscription.nextBillingDate;
+    const frequency = subscription.billingFrequency || plan.frequency;
+    subscription.billingFrequency = frequency;
     const periodEnd = addBillingPeriod(
       periodStart,
-      plan.frequency,
+      frequency,
       subscription.billingAnchorDate || subscription.startDate
     );
     const [event] = await SubscriptionBillingEvent.create(
@@ -1040,6 +1080,7 @@ module.exports = {
   ServiceError,
   fail,
   money,
+  dueBillingFilter,
   listProducts,
   getProduct,
   createProduct,
