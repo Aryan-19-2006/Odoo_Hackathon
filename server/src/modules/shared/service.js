@@ -119,6 +119,10 @@ function lineItemsTotal(lines) {
   return money(lines.reduce((sum, line) => sum + line.lineTotal, 0));
 }
 
+function isEarlyClose(expiryDate, now) {
+  return !expiryDate || now < expiryDate;
+}
+
 function dueBillingFilter({ asOf, planId, frequency, matchingPlanIds = [] }) {
   const filter = {
     status: 'active',
@@ -959,8 +963,9 @@ async function transitionSubscription(id, action, actorId, { customerId } = {}) 
       if (!['confirmed', 'active', 'paused'].includes(previous)) {
         fail(409, 'Only confirmed, active, or paused subscriptions can be closed');
       }
-      const isEarly = subscription.expiryDate && now < subscription.expiryDate;
-      if (isEarly && !plan.earlyCloseAllowed) fail(403, 'Early close is not allowed by this plan');
+      if (isEarlyClose(subscription.expiryDate, now) && !plan.earlyCloseAllowed) {
+        fail(403, 'Early close is not allowed by this plan');
+      }
       subscription.status = 'closed';
       subscription.closedAt = now;
     } else if (action === 'renew') {
@@ -1080,6 +1085,7 @@ module.exports = {
   ServiceError,
   fail,
   money,
+  isEarlyClose,
   dueBillingFilter,
   listProducts,
   getProduct,

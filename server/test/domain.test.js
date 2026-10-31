@@ -8,7 +8,7 @@ const {
   authorizeOwnAction,
   assertCustomerCanRequest
 } = require('../src/middleware/access');
-const { dueBillingFilter } = require('../src/modules/shared/service');
+const { dueBillingFilter, isEarlyClose } = require('../src/modules/shared/service');
 
 test('daily and weekly billing periods use exact UTC day increments', () => {
   const start = new Date('2024-01-01T10:15:00.000Z');
@@ -52,6 +52,13 @@ test('due billing frequency filters use snapshots and fall back only for legacy 
       }
     ]
   });
+});
+
+test('closing a non-expiring subscription is considered an early close', () => {
+  const now = new Date('2025-03-01T00:00:00.000Z');
+  assert.equal(isEarlyClose(null, now), true);
+  assert.equal(isEarlyClose(new Date('2025-03-02T00:00:00.000Z'), now), true);
+  assert.equal(isEarlyClose(new Date('2025-02-28T00:00:00.000Z'), now), false);
 });
 
 test('unsupported billing frequencies and invalid dates are rejected', () => {

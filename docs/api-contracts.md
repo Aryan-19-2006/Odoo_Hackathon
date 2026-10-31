@@ -32,7 +32,7 @@ Creating a quotation also creates a linked subscription in `quotation` status. `
 
 ## Subscription lifecycle and billing boundary
 
-`POST /api/subscriptions` creates a `draft`; `PATCH` edits only drafts. Available lifecycle actions are `quotation` (via the endpoint above), confirm quotation, activate, pause, resume, renew, and close. A pause shifts the next billing and expiry dates by the pause duration. Expired active/confirmed subscriptions are marked expired when read or included in a current due-billing/list query; expired subscriptions are not returned as billable. Plan flags gate pause, early close, renewal, and automatic close. Every transition is written to subscription history at `/api/subscriptions/:id/history`.
+`POST /api/subscriptions` creates a `draft`; `PATCH` edits only drafts. Available lifecycle actions are `quotation` (via the endpoint above), confirm quotation, activate, pause, resume, renew, and close. A pause shifts the next billing and expiry dates by the pause duration. Expired active/confirmed subscriptions are marked expired when read or included in a current due-billing/list query; expired subscriptions are not returned as billable. Plan flags gate pause, early close, renewal, and automatic close; closing a subscription without an expiry date is treated as an early close. Every transition is written to subscription history at `/api/subscriptions/:id/history`.
 
 Subscription items are separate `SubscriptionItem` documents and retain product/variant names, quantity, unit price, tax reference/rate, and totals as historical snapshots. `DELETE` on product and plan resources archives them, preserving billing history.
 
